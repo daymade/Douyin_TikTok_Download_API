@@ -17,9 +17,11 @@ import uvicorn
 import zipfile
 import threading
 import configparser
+import asyncio
 
 from fastapi import FastAPI, Request
-from fastapi.responses import ORJSONResponse, FileResponse
+from fastapi.responses import ORJSONResponse, FileResponse, HTMLResponse
+
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -600,6 +602,119 @@ async def Get_Shortcut():
 """ ________________________⬇️下载文件端点/函数(Download file endpoints/functions)⬇️________________________"""
 
 
+async def parse_url(url: str):
+    # 解析 URL 并获取必要的信息
+    data = await api.hybrid_parsing(url)
+    return data
+
+async def download_media(data, prefix, watermark):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+
+    file_name_prefix = config["Web_API"]["File_Name_Prefix"] if prefix else ''
+    root_path = config["Web_API"]["Download_Path"]
+    
+    url_type = data.get('type')
+    platform = data.get('platform')
+    aweme_id = data.get('aweme_id')
+    
+    # 查看目录是否存在，不存在就创建
+    if not os.path.exists(root_path):
+        os.makedirs(root_path)
+
+    if url_type == 'video':
+        file_name = file_name_prefix + platform + '_' + aweme_id + '.mp4' if not watermark else file_name_prefix + platform + '_' + aweme_id + '_watermark' + '.mp4'
+        url = data.get('video_data').get('nwm_video_url_HQ') if not watermark else data.get('video_data').get(
+            'wm_video_url_HQ')
+        print('url: ', url)
+        file_path = root_path + "/" + file_name
+        print('file_path: ', file_path)
+        # 判断文件是否存在，存在就直接返回
+        if os.path.exists(file_path):
+            print('文件已存在，直接返回')
+
+            res = {}
+            res['file_path'] = file_path
+            res['media_type'] = 'video/mp4'
+            res['filename'] = file_name
+            res['user'] = "douyinxiazai"
+            return res
+        else:
+            if platform == 'douyin':
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url=url, headers=headers, allow_redirects=False) as response:
+                        r = response.headers
+                        cdn_url = r.get('location')
+                        async with session.get(url=cdn_url) as res:
+                            r = await res.content.read()
+            elif platform == 'tiktok':
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url=url, headers=headers) as res:
+                        r = await res.content.read()
+            with open(file_path, 'wb') as f:
+                f.write(r)
+
+            res = {}
+            res['file_path'] = file_path
+            res['media_type'] = 'video/mp4'
+            res['filename'] = file_name
+            res['user'] = "douyinxiazai"
+            return res
+    elif url_type == 'image':
+        url = data.get('image_data').get('no_watermark_image_list') if not watermark else data.get(
+            'image_data').get('watermark_image_list')
+        print('url: ', url)
+        zip_file_name = file_name_prefix + platform + '_' + aweme_id + '_images.zip' if not watermark else file_name_prefix + platform + '_' + aweme_id + '_images_watermark.zip'
+        zip_file_path = root_path + "/" + zip_file_name
+        print('zip_file_name: ', zip_file_name)
+        print('zip_file_path: ', zip_file_path)
+        # 判断文件是否存在，存在就直接返回、
+        if os.path.exists(zip_file_path):
+            print('文件已存在，直接返回')
+            res = {}
+            res['file_path'] = zip_file_path
+            res['media_type'] = 'zip'
+            res['filename'] = zip_file_name
+            res['user'] = "douyinxiazai"
+            return res
+        
+        file_path_list = []
+        for i in url:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url=i, headers=headers) as res:
+                    content_type = res.headers.get('content-type')
+                    file_format = content_type.split('/')[1]
+                    r = await res.content.read()
+            index = int(url.index(i))
+            file_name = file_name_prefix + platform + '_' + aweme_id + '_' + str(
+                index + 1) + '.' + file_format if not watermark else \
+                file_name_prefix + platform + '_' + aweme_id + '_' + str(
+                    index + 1) + '_watermark' + '.' + file_format
+            file_path = root_path + "/" + file_name
+            file_path_list.append(file_path)
+            print('file_path: ', file_path)
+            with open(file_path, 'wb') as f:
+                f.write(r)
+            if len(url) == len(file_path_list):
+                zip_file = zipfile.ZipFile(zip_file_path, 'w')
+                for f in file_path_list:
+                    zip_file.write(os.path.join(f), f, zipfile.ZIP_DEFLATED)
+                zip_file.close()
+
+                res = {}
+                res['file_path'] = zip_file_path
+                res['media_type'] = 'zip'
+                res['filename'] = zip_file_name
+                res['user'] = "douyinxiazai"
+                return res
+            else:
+                raise Exception("下载文件失败/Download file failed")
+    else:
+        return ORJSONResponse(data)
+
+
+
 # 下载文件端点/Download file endpoint
 @app.get("/download", tags=["Download"])
 @limiter.limit(Rate_Limit)
@@ -621,88 +736,22 @@ async def download_file_hybrid(request: Request, url: str, prefix: bool = True, 
                                "message": "此端点已关闭请在配置文件中开启/This endpoint is closed, please enable it in the configuration file"})
     # 开始时间
     start_time = time.time()
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    data = await api.hybrid_parsing(url)
+
+    data = await parse_url(url)
     if data is None:
-        return ORJSONResponse(data)
+        return ORJSONResponse({"status": "error", "message": "Error in parsing URL"})
+
+    # 记录API调用
+    await api_logs(start_time=start_time,
+                    input_data={'url': url},
+                    endpoint='download')
+    
+    res = await download_media(data, prefix, watermark)
+    if res is None:
+        return ORJSONResponse({"status": "error", "message": "Error in downloading media"})
     else:
-        # 记录API调用
-        await api_logs(start_time=start_time,
-                       input_data={'url': url},
-                       endpoint='download')
-        url_type = data.get('type')
-        platform = data.get('platform')
-        aweme_id = data.get('aweme_id')
-        file_name_prefix = config["Web_API"]["File_Name_Prefix"] if prefix else ''
-        root_path = config["Web_API"]["Download_Path"]
-        # 查看目录是否存在，不存在就创建
-        if not os.path.exists(root_path):
-            os.makedirs(root_path)
-        if url_type == 'video':
-            file_name = file_name_prefix + platform + '_' + aweme_id + '.mp4' if not watermark else file_name_prefix + platform + '_' + aweme_id + '_watermark' + '.mp4'
-            url = data.get('video_data').get('nwm_video_url_HQ') if not watermark else data.get('video_data').get(
-                'wm_video_url_HQ')
-            print('url: ', url)
-            file_path = root_path + "/" + file_name
-            print('file_path: ', file_path)
-            # 判断文件是否存在，存在就直接返回
-            if os.path.exists(file_path):
-                print('文件已存在，直接返回')
-                return FileResponse(path=file_path, media_type='video/mp4', filename=file_name)
-            else:
-                if platform == 'douyin':
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(url=url, headers=headers, allow_redirects=False) as response:
-                            r = response.headers
-                            cdn_url = r.get('location')
-                            async with session.get(url=cdn_url) as res:
-                                r = await res.content.read()
-                elif platform == 'tiktok':
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(url=url, headers=headers) as res:
-                            r = await res.content.read()
-                with open(file_path, 'wb') as f:
-                    f.write(r)
-                return FileResponse(path=file_path, media_type='video/mp4', filename=file_name)
-        elif url_type == 'image':
-            url = data.get('image_data').get('no_watermark_image_list') if not watermark else data.get(
-                'image_data').get('watermark_image_list')
-            print('url: ', url)
-            zip_file_name = file_name_prefix + platform + '_' + aweme_id + '_images.zip' if not watermark else file_name_prefix + platform + '_' + aweme_id + '_images_watermark.zip'
-            zip_file_path = root_path + "/" + zip_file_name
-            print('zip_file_name: ', zip_file_name)
-            print('zip_file_path: ', zip_file_path)
-            # 判断文件是否存在，存在就直接返回、
-            if os.path.exists(zip_file_path):
-                print('文件已存在，直接返回')
-                return FileResponse(path=zip_file_path, media_type='zip', filename=zip_file_name)
-            file_path_list = []
-            for i in url:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url=i, headers=headers) as res:
-                        content_type = res.headers.get('content-type')
-                        file_format = content_type.split('/')[1]
-                        r = await res.content.read()
-                index = int(url.index(i))
-                file_name = file_name_prefix + platform + '_' + aweme_id + '_' + str(
-                    index + 1) + '.' + file_format if not watermark else \
-                    file_name_prefix + platform + '_' + aweme_id + '_' + str(
-                        index + 1) + '_watermark' + '.' + file_format
-                file_path = root_path + "/" + file_name
-                file_path_list.append(file_path)
-                print('file_path: ', file_path)
-                with open(file_path, 'wb') as f:
-                    f.write(r)
-                if len(url) == len(file_path_list):
-                    zip_file = zipfile.ZipFile(zip_file_path, 'w')
-                    for f in file_path_list:
-                        zip_file.write(os.path.join(f), f, zipfile.ZIP_DEFLATED)
-                    zip_file.close()
-                    return FileResponse(path=zip_file_path, media_type='zip', filename=zip_file_name)
-        else:
-            return ORJSONResponse(data)
+        return FileResponse(path=res.file_path, media_type=res.media_type, filename=res.filename)
+
 
 
 # 批量下载文件端点/Batch download file endpoint
@@ -715,6 +764,94 @@ async def batch_download_file(url_list: str, prefix: bool = True):
     print('url_list: ', url_list)
     return ORJSONResponse({"status": "failed",
                            "message": "嘿嘿嘿，这个功能还没做呢，等我有空再做吧/Hehehe, this function hasn't been done yet, I'll do it when I have time"})
+
+
+@app.get("/convert", response_class=HTMLResponse, tags=["Convert"])
+@limiter.limit(Rate_Limit)
+async def convert(request: Request, url: str, prefix: bool = True, watermark: bool = False):
+    """
+    ## 用途/Usage
+    ### [中文]
+    - 将[抖音|TikTok]链接提交至此端点，返回视频文件的文本转换结果。
+    ### [English]
+    - Submit the [Douyin|TikTok] link to this endpoint and return the text conversion result of the video file.
+    # 参数/Parameter
+    - url: str -> [Douyin|TikTok] 视频链接/[Douyin|TikTok] video link
+    - prefix: bool -> [True/False] 是否添加前缀/Whether to add a prefix
+    - watermark: bool -> [True/False] 是否添加水印/Whether to add a watermark
+    """
+    # 开始时间
+    start_time = time.time()
+
+    data = await parse_url(url)
+    # log data
+    print('data: ', data)
+    
+    if data is None:
+        return ORJSONResponse({"status": "error", "message": "Error in parsing URL"})
+
+    # 记录API调用
+    await api_logs(start_time=start_time,
+                    input_data={'url': url},
+                    endpoint='convert')
+    
+    # 调用之前实现的下载文件功能
+    res = await download_media(data, prefix, watermark)
+    # log
+    print('res: ', res)
+
+    if res is None:
+        return ORJSONResponse({"status": "error", "message": "Error in downloading media"})
+    
+    file_path = res["file_path"]
+    user = res["user"]
+
+    print("Current PATH:", os.environ.get("PATH"))
+
+    # 使用 shell 命令调用 v2t 工具进行视频到文本的转换
+    # ./v2t convert --video -i "/Volumes/SSD2T/workspace/python/Douyin_TikTok_Download_API/download/api.douyin.wtf_douyin_7318221551558544691.mp4" -u "user"
+    convert_command = f"/Volumes/SSD2T/workspace/go/tiktok-whisper/v2t convert --video -i \"{file_path}\" -u \"{user}\""
+    print('convert_command: ', convert_command)
+    process = await asyncio.create_subprocess_shell(
+        convert_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE)
+
+    stdout, stderr = await process.communicate()
+    print('stdout: ', stdout.decode())
+    print('stderr: ', stderr.decode())
+
+    if process.returncode == 0:
+        # 成功转换
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Text Display</title>
+            <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+        </head>
+        <body class="bg-gray-100">
+            <div class="container mx-auto p-4">
+                <div class="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4">
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2" for="text-display">
+                            Transcription Output:
+                        </label>
+                        <div id="text-display" class="border rounded w-full p-3 text-gray-700 break-words whitespace-pre-wrap">
+                            {stdout.decode()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+    else:
+        # 转换失败
+        return ORJSONResponse({"status": "failed", "error": stderr.decode()})
 
 
 # 抖音链接格式下载端点(video)/Douyin link format download endpoint(video)
